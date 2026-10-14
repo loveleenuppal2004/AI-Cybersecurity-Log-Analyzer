@@ -1,86 +1,106 @@
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 
-df = pd.read_csv("data/security_logs.csv")
-df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-ip_features = df.groupby("ip_address").agg(
-    total_events=("ip_address", "count"),
-    failed_logins=("status", lambda x: (
-        (df.loc[x.index, "event_type"] == "login") &
-        (x == "failed")
-    ).sum()),
-    successful_logins=("status", lambda x: (
-        (df.loc[x.index, "event_type"] == "login") &
-        (x == "success")
-    ).sum()),
-    unique_users=("username", "nunique")
-).reset_index()
+def detect_anomalies(df):
+    """
+    Analyze IP address behavior and identify anomalies
+    using an Isolation Forest model.
+    """
 
-ip_features["total_login_attempts"] = (
-    ip_features["failed_logins"] +
-    ip_features["successful_logins"]
-)
+    df = df.copy()
 
-ip_features["failure_rate"] = (
-    ip_features["failed_logins"] /
-    ip_features["total_login_attempts"]
-)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-features = [
-    "total_events",
-    "failed_logins",
-    "successful_logins",
-    "unique_users",
-    "failure_rate"
-]
+    ip_features = df.groupby("ip_address").agg(
+        total_events=("ip_address", "count"),
+        failed_logins=("status", lambda x: (
+            (df.loc[x.index, "event_type"] == "login") &
+            (x == "failed")
+        ).sum()),
+        successful_logins=("status", lambda x: (
+            (df.loc[x.index, "event_type"] == "login") &
+            (x == "success")
+        ).sum()),
+        unique_users=("username", "nunique")
+    ).reset_index()
 
-X = ip_features[features]
+    ip_features["total_login_attempts"] = (
+        ip_features["failed_logins"] +
+        ip_features["successful_logins"]
+    )
 
-model = IsolationForest(
-    contamination=0.10,
-    random_state=42
-)
+    ip_features["failure_rate"] = (
+        ip_features["failed_logins"]
+        / ip_features["total_login_attempts"].replace(0, 1)
+    )
 
-model.fit(X)
+    features = [
+        "total_events",
+        "failed_logins",
+        "successful_logins",
+        "unique_users",
+        "failure_rate"
+    ]
 
-ip_features["anomaly_prediction"] = model.predict(X)
+    X = ip_features[features]
 
-ip_features["anomaly_score"] = model.decision_function(X)
+    # Train the Isolation Forest model.
+    model = IsolationForest(
+        contamination=0.10,
+        random_state=42
+    )
 
-ip_features["classification"] = ip_features[
-    "anomaly_prediction"
-].map({
-    1: "Normal",
-    -1: "Anomalous"
-})
+    model.fit(X)
 
-print("=" * 60)
-print("AI CYBERSECURITY ANOMALY DETECTION")
-print("=" * 60)
+    # Generate actual machine learning predictions.
+    ip_features["anomaly_prediction"] = model.predict(X)
 
-print("\nIP Behavior Analysis:\n")
+    ip_features["anomaly_score"] = model.decision_function(X)
 
-print(
-    ip_features[
-        [
-            "ip_address",
-            "total_events",
-            "failed_logins",
-            "successful_logins",
-            "failure_rate",
-            "anomaly_score",
-            "classification"
-        ]
-    ].to_string(index=False)
-)
+    ip_features["classification"] = (
+        ip_features["anomaly_prediction"]
+        .map({
+            1: "Normal",
+            -1: "Anomalous"
+        })
+    )
 
-anomalies = ip_features[
-    ip_features["classification"] == "Anomalous"
-]
+    return ip_features
 
-print("\n" + "=" * 60)
-print("DETECTED ANOMALIES")
-print("=" * 60)
 
-print(anomalies.to_string(index=False))
+if __name__ == "__main__":
+
+    df = pd.read_csv("data/security_logs.csv")
+
+    results = detect_anomalies(df)
+
+    print("=" * 60)
+    print("AI CYBERSECURITY ANOMALY DETECTION")
+    print("=" * 60)
+
+    print("\nIP Behavior Analysis:\n")
+
+    print(
+        results[
+            [
+                "ip_address",
+                "total_events",
+                "failed_logins",
+                "successful_logins",
+                "failure_rate",
+                "anomaly_score",
+                "classification"
+            ]
+        ].to_string(index=False)
+    )
+
+    anomalies = results[
+        results["classification"] == "Anomalous"
+    ]
+
+    print("\n" + "=" * 60)
+    print("DETECTED ANOMALIES")
+    print("=" * 60)
+
+    print(anomalies.to_string(index=False))

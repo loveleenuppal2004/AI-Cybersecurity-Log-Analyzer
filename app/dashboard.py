@@ -1,5 +1,9 @@
-import streamlit as st
 import pandas as pd
+import streamlit as st
+from pathlib import Path
+
+from src.risk_scoring import calculate_risk_scores
+
 
 # --------------------------------------------------
 # PAGE CONFIGURATION
@@ -11,330 +15,308 @@ st.set_page_config(
     layout="wide"
 )
 
-# --------------------------------------------------
-# LOAD DATA
-# --------------------------------------------------
-
-df = pd.read_csv("data/security_logs.csv")
-
-df["timestamp"] = pd.to_datetime(df["timestamp"])
 
 # --------------------------------------------------
-# BASIC METRICS
+# LOAD SECURITY LOGS
 # --------------------------------------------------
 
-total_events = len(df)
-
-failed_logins = len(
-    df[
-        (df["event_type"] == "login") &
-        (df["status"] == "failed")
-    ]
-)
-
-successful_logins = len(
-    df[
-        (df["event_type"] == "login") &
-        (df["status"] == "success")
-    ]
-)
-
-failed_by_ip = (
-    df[
-        (df["event_type"] == "login") &
-        (df["status"] == "failed")
-    ]
-    .groupby("ip_address")
-    .size()
-    .sort_values(ascending=False)
-)
-
-suspicious_ips = failed_by_ip[
-    failed_by_ip >= 10
-]
-
-# --------------------------------------------------
-# RISK ANALYSIS
-# --------------------------------------------------
-
-risk_data = []
-
-for ip in df["ip_address"].unique():
-
-    ip_data = df[df["ip_address"] == ip]
-
-    ip_failed = len(
-        ip_data[
-            (ip_data["event_type"] == "login") &
-            (ip_data["status"] == "failed")
-        ]
-    )
-
-    ip_successful = len(
-        ip_data[
-            (ip_data["event_type"] == "login") &
-            (ip_data["status"] == "success")
-        ]
-    )
-
-    total_logins = ip_failed + ip_successful
-
-    if total_logins > 0:
-        failure_rate = ip_failed / total_logins
-    else:
-        failure_rate = 0
-
-    risk_score = 0
-
-    if ip_failed >= 10:
-        risk_score += 40
-
-    if failure_rate >= 0.80:
-        risk_score += 30
-
-    unique_users = ip_data["username"].nunique()
-
-    if unique_users >= 3:
-        risk_score += 10
-
-    # ML anomaly indicator
-    ml_anomaly = ip_failed >= 10
-
-    if ml_anomaly:
-        risk_score += 20
-
-    risk_score = min(risk_score, 100)
-
-    if risk_score >= 80:
-        risk_level = "Critical"
-    elif risk_score >= 60:
-        risk_level = "High"
-    elif risk_score >= 30:
-        risk_level = "Medium"
-    else:
-        risk_level = "Low"
-
-    risk_data.append({
-        "IP Address": ip,
-        "Failed Logins": ip_failed,
-        "Successful Logins": ip_successful,
-        "Failure Rate": failure_rate,
-        "Unique Users": unique_users,
-        "Risk Score": risk_score,
-        "Risk Level": risk_level,
-        "ML Anomaly": ml_anomaly
-    })
-
-risk_df = pd.DataFrame(risk_data)
-
-# --------------------------------------------------
-# TITLE
-# --------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_PATH = PROJECT_ROOT / "data" / "security_logs.csv"
 
 st.title("🔐 AI Cybersecurity Log Analyzer")
 
 st.write(
-    "A security analytics dashboard combining "
-    "rule-based detection, anomaly detection, "
+    "An intelligent security analytics dashboard combining "
+    "rule-based detection, Isolation Forest anomaly detection, "
     "risk scoring, and explainable threat analysis."
 )
 
+if not DATA_PATH.exists():
+    st.error("Security log dataset not found.")
+    st.stop()
+
+df = pd.read_csv(DATA_PATH)
+
+df["timestamp"] = pd.to_datetime(
+    df["timestamp"],
+    errors="coerce"
+)
+
+df = df.dropna(subset=["timestamp"])
+
+
 # --------------------------------------------------
-# METRICS
+# CALCULATE ACTUAL ML PREDICTIONS AND RISK SCORES
 # --------------------------------------------------
+
+ip_features = calculate_risk_scores(df)
+
+
+# --------------------------------------------------
+# KEY SECURITY METRICS
+# --------------------------------------------------
+
+total_events = len(df)
+
+failed_logins = df[
+    (df["event_type"] == "login") &
+    (df["status"] == "failed")
+]
+
+successful_logins = df[
+    (df["event_type"] == "login") &
+    (df["status"] == "success")
+]
+
+suspicious_ips = ip_features[
+    ip_features["anomaly_prediction"] == -1
+]
 
 col1, col2, col3, col4 = st.columns(4)
 
-with col1:
-    st.metric(
-        "Total Events",
-        total_events
-    )
+col1.metric(
+    "Total Events",
+    total_events
+)
 
-with col2:
-    st.metric(
-        "Failed Logins",
-        failed_logins
-    )
+col2.metric(
+    "Failed Logins",
+    len(failed_logins)
+)
 
-with col3:
-    st.metric(
-        "Successful Logins",
-        successful_logins
-    )
+col3.metric(
+    "Successful Logins",
+    len(successful_logins)
+)
 
-with col4:
-    st.metric(
-        "Suspicious IPs",
-        len(suspicious_ips)
-    )
+col4.metric(
+    "ML-Detected Anomalies",
+    len(suspicious_ips)
+)
+
 
 # --------------------------------------------------
-# SECURITY ALERT
+# CRITICAL THREAT ALERT
 # --------------------------------------------------
 
-st.subheader("🚨 Security Alerts")
+st.divider()
 
-critical_ips = risk_df[
-    risk_df["Risk Level"] == "Critical"
+st.header("🚨 Security Alerts")
+
+critical_ips = ip_features[
+    ip_features["risk_level"] == "Critical"
 ]
 
-if len(critical_ips) > 0:
+if not critical_ips.empty:
 
     for _, row in critical_ips.iterrows():
 
         st.error(
-            f"CRITICAL THREAT: {row['IP Address']} "
-            f"has a risk score of {row['Risk Score']}/100."
+            f"CRITICAL THREAT: {row['ip_address']} "
+            f"has a risk score of {row['risk_score']}/100."
         )
 
 else:
+    st.success("No critical-risk IP addresses detected.")
 
-    st.success(
-        "No critical threats detected."
-    )
 
 # --------------------------------------------------
-# THREAT DETAILS
+# THREAT ANALYSIS
 # --------------------------------------------------
 
-st.subheader("🛡️ Threat Analysis")
+st.header("🔍 Threat Analysis")
 
-if len(critical_ips) > 0:
+if not suspicious_ips.empty:
 
-    for _, row in critical_ips.iterrows():
+    for _, row in suspicious_ips.iterrows():
 
-        st.warning(
-            f"IP Address: {row['IP Address']} | "
-            f"Risk Level: {row['Risk Level']}"
-        )
+        with st.expander(
+            f"Investigate {row['ip_address']} — "
+            f"{row['classification']}",
+            expanded=True
+        ):
 
-        col1, col2, col3 = st.columns(3)
+            col1, col2, col3 = st.columns(3)
 
-        with col1:
-            st.metric(
+            col1.metric(
                 "Risk Score",
-                f"{row['Risk Score']}/100"
+                f"{row['risk_score']}/100"
             )
 
-        with col2:
-            st.metric(
+            col2.metric(
                 "Failed Logins",
-                row["Failed Logins"]
+                int(row["failed_logins"])
             )
 
-        with col3:
-            st.metric(
+            col3.metric(
                 "Failure Rate",
-                f"{row['Failure Rate'] * 100:.2f}%"
+                f"{row['failure_rate']:.2%}"
             )
 
-        st.write("### Why was this IP flagged?")
-
-        if row["Failed Logins"] >= 10:
             st.write(
-                f"🔴 {row['Failed Logins']} failed login attempts"
+                f"**Risk Level:** {row['risk_level']}"
             )
 
-        if row["Failure Rate"] >= 0.80:
             st.write(
-                f"🔴 Extremely high login failure rate "
-                f"({row['Failure Rate'] * 100:.2f}%)"
+                f"**ML Classification:** {row['classification']}"
             )
 
-        if row["ML Anomaly"]:
             st.write(
-                "🤖 Behavior identified as anomalous "
-                "by the detection model"
+                f"**Isolation Forest Prediction:** "
+                f"{row['anomaly_prediction']}"
             )
+
+            st.write(
+                f"**Anomaly Score:** "
+                f"{row['anomaly_score']:.4f}"
+            )
+
+            st.subheader("Why was this IP flagged?")
+
+            reasons = []
+
+            if row["failed_logins"] >= 10:
+                reasons.append(
+                    f"{int(row['failed_logins'])} failed login attempts"
+                )
+
+            if row["failure_rate"] >= 0.80:
+                reasons.append(
+                    f"Extremely high login failure rate "
+                    f"({row['failure_rate']:.2%})"
+                )
+
+            if row["unique_users"] >= 3:
+                reasons.append(
+                    f"Access attempts involving "
+                    f"{int(row['unique_users'])} different users"
+                )
+
+            if row["anomaly_prediction"] == -1:
+                reasons.append(
+                    "Isolation Forest identified unusual IP behavior"
+                )
+
+            if reasons:
+                for reason in reasons:
+                    st.write(f"- {reason}")
+            else:
+                st.write(
+                    "The model identified unusual behavior "
+                    "that requires further investigation."
+                )
+
+else:
+    st.info("The model did not identify any anomalous IP addresses.")
+
 
 # --------------------------------------------------
-# RISK TABLE
+# RISK ANALYSIS TABLE
 # --------------------------------------------------
 
-st.subheader("📊 Risk Analysis by IP")
+st.divider()
 
-display_df = risk_df.copy()
+st.header("📊 Risk Analysis by IP")
 
-display_df["Failure Rate"] = (
-    display_df["Failure Rate"] * 100
-).round(2)
+display_columns = [
+    "ip_address",
+    "failed_logins",
+    "successful_logins",
+    "failure_rate",
+    "anomaly_score",
+    "classification",
+    "risk_score",
+    "risk_level"
+]
 
-display_df = display_df.rename(
-    columns={
-        "Failure Rate": "Failure Rate (%)"
-    }
+risk_table = ip_features[display_columns].copy()
+
+risk_table["failure_rate"] = (
+    risk_table["failure_rate"].map(
+        lambda value: f"{value:.2%}"
+    )
 )
 
 st.dataframe(
-    display_df,
+    risk_table.sort_values(
+        "risk_score",
+        ascending=False
+    ),
     use_container_width=True,
     hide_index=True
 )
 
+
 # --------------------------------------------------
-# FAILED LOGINS BY IP
+# FAILED LOGIN CHART
 # --------------------------------------------------
 
-st.subheader("Failed Login Attempts by IP")
+st.divider()
 
-failed_ip_df = (
-    failed_by_ip
-    .reset_index()
+st.header("📈 Failed Login Attempts by IP")
+
+failed_by_ip = (
+    failed_logins.groupby("ip_address")
+    .size()
+    .sort_values(ascending=False)
 )
 
-failed_ip_df.columns = [
-    "IP Address",
-    "Failed Logins"
-]
+st.bar_chart(failed_by_ip)
 
-st.bar_chart(
-    failed_ip_df.set_index("IP Address")
+
+# --------------------------------------------------
+# LOGIN ACTIVITY CHART
+# --------------------------------------------------
+
+st.header("📊 Login Activity")
+
+login_activity = (
+    df[df["event_type"] == "login"]
+    .groupby(["ip_address", "status"])
+    .size()
+    .unstack(fill_value=0)
 )
 
-# --------------------------------------------------
-# LOGIN ACTIVITY
-# --------------------------------------------------
+st.bar_chart(login_activity)
+
+
 # --------------------------------------------------
 # ATTACK TIMELINE
 # --------------------------------------------------
 
-st.subheader("⏱️ Failed Login Activity Over Time")
+st.divider()
 
-failed_login_timeline = df[
-    (df["event_type"] == "login") &
-    (df["status"] == "failed")
-].copy()
+st.header("⏱️ Failed Login Activity Over Time")
 
-failed_login_timeline = (
-    failed_login_timeline
-    .set_index("timestamp")
-    .resample("10min")
-    .size()
-)
+failed_login_timeline = failed_logins.copy()
 
-st.line_chart(
-    failed_login_timeline
-)
+if not failed_login_timeline.empty:
 
-st.caption(
-    "A sudden increase in failed login activity "
-    "may indicate a brute-force attack."
-)
-st.subheader("Login Activity")
+    timeline = (
+        failed_login_timeline
+        .set_index("timestamp")
+        .resample("10min")
+        .size()
+    )
 
-login_status = (
-    df[df["event_type"] == "login"]["status"]
-    .value_counts()
-)
+    st.line_chart(timeline)
 
-st.bar_chart(login_status)
+    st.caption(
+        "A sudden increase in failed login activity "
+        "may indicate a brute-force attack."
+    )
+
+else:
+    st.info("No failed login activity was found.")
+
 
 # --------------------------------------------------
 # SECURITY LOGS
 # --------------------------------------------------
 
-st.subheader("Security Logs")
+st.divider()
+
+st.header("📋 Security Logs")
 
 st.dataframe(
     df.sort_values(
@@ -345,6 +327,7 @@ st.dataframe(
     hide_index=True
 )
 
+
 # --------------------------------------------------
 # FOOTER
 # --------------------------------------------------
@@ -352,7 +335,7 @@ st.dataframe(
 st.divider()
 
 st.caption(
-    "AI Cybersecurity Log Analyzer | "
-    "Built with Python, pandas, scikit-learn, "
-    "and Streamlit"
+    "Educational cybersecurity analytics project. "
+    "Anomaly predictions indicate unusual behavior, "
+    "not confirmed malicious activity."
 )
